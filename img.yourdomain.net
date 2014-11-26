@@ -1,0 +1,91 @@
+server {
+    listen 80;
+    server_name img.yourdomain.net;
+    access_log /var/log/nginx/img.yourdomain.net_access.log;
+    error_log /var/log/nginx/img.yourdomain.net_error.log;
+    root /var/lib/imgroot;
+    
+    location / {
+        #let the ngx.var.uri available
+        set $tmpuri $uri;
+    
+        rewrite_by_lua '
+            local imgrootdir = "/var/lib/imgroot"
+            local lfs = require("lfs")
+            local fpath = imgrootdir .. ngx.var.uri
+            local ft = lfs.attributes(fpath, "mode")
+            if ft == nil then
+                local dir,file = string.match(ngx.var.uri, "(.*/)(.*)")
+                if file == nil then
+                    ngx.log(ngx.ERR, "Invalid image file \'"..ngx.var.uri.."\'")
+                    ngx.exit(404)
+                else
+                    local base,op,w,h,ext = string.match(file, "(.*)_([CS])_(%d+)x(%d+)%.(.*)")
+                    if op ~= "C" and op ~= "S" then
+                        return
+                    end
+                    if w == nil or h == nil then
+                        ngx.log(ngx.ERR, "Invalid spec")
+                        ngx.exit(404)
+                    end
+                    local orig = imgrootdir .. dir .. base .. "." .. ext
+                    local ft = lfs.attributes(orig, "mode")
+                    if ft == nil then
+                        ngx.log(ngx.ERR, string.format("File %s not found", orig))
+                        ngx.exit(404)
+                    end
+                    local cmd = string.format("/usr/bin/gm identify -format \'%%wx%%h\' \'%s\'", orig)
+                    local stdout = io.popen(cmd)
+                    local txt = stdout.read(stdout)
+                    local ow,oh = string.match(txt, "(%d+)x(%d+)")
+                    if ow == nil or oh == nil then
+                        ngx.log(ngx.ERR, string.format("Unable to decode the original file %s", orig))
+                        ngx.exit(404)
+                    end
+                           
+                    w = tonumber(w)
+                    h = tonumber(h)
+                    ow = tonumber(ow)
+                    oh = tonumber(oh)
+                    if w == ow and h == oh then
+                        local uri = dir .. base .. "." .. ext
+                        ngx.req.set_uri(uri, true)
+                        return
+                    end
+                    local offx, offy, nw, nh
+                    if op == "C" then
+                        local wr = w / ow
+                        local hr = h / oh
+                        local r = math.max(wr, hr)
+                        nw = math.min(ow, w / r)
+                        nh = math.min(oh, h / r)
+                        offx = (ow - nw) / 2
+                        offy = (oh - nh) / 2
+                        w = math.min(w , nw)
+                        h = math.min(h , nh)
+                    end
+
+                    local dstdir = imgrootdir .. dir
+                    local dstfnm = dstdir .. file 
+                    local cmd = nil
+                    if op == "C" then
+                        cmd = string.format("/usr/bin/gm convert \'%s\' -crop %dx%d+%d+%d -resize %dx%d \'%s\'", orig, nw, nh, offx, offy, w, h, dstfnm)
+                    else
+                        cmd = string.format("/usr/bin/gm convert \'%s\' -thumbnail %dx%d -background white -gravity center -extent %dx%d \'%s\'", orig, w, h, w, h, dstfnm)
+                    end
+                    local ec = os.execute(cmd)
+                    if ec ~= 0 then
+                        ngx.log(ngx.ERR, string.format("Create thumbnail fail , exit code is %d, cmd is %s", ec, cmd))
+                        ngx.exit(404)
+                    end
+                end
+            end
+        ';
+    }
+    
+    error_page     500 502 503 504    /50x.html;
+    location = /50x.html {
+        root     html;
+    }
+}
+    
